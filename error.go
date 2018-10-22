@@ -1,5 +1,7 @@
 package sjs
 
+import "github.com/pkg/errors"
+
 type Missing error
 
 func IsMissing(err error) bool {

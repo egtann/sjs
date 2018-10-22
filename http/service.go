@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -15,30 +17,27 @@ import (
 	"github.com/pkg/errors"
 )
 
-type Server struct {
-	mux     *http.ServeMux
+type Service struct {
+	Mux *http.ServeMux
+
 	db      sjs.DataStorage
-	log     sjs.Logger
-	client  *http.Client
+	workers *sjs.WorkerMap
+	sjsURL  string
 	apiKey  string
-	workers sjs.WorkerMap
+	errCh   chan error // Nil unless *service.Err() is called
 }
 
-// NewServer prepares the endpoints and starts the jobs. The error channel is
+// NewService prepares the endpoints and starts the jobs. The error channel is
 // optional; if the channel is not nil, the server will send errors encountered
 // when running jobs. Jobs are distributed to workers round-robin.
-func NewServer(
-	log sjs.Logger,
+func NewService(
 	db sjs.DataStorage,
 	apiKey string,
 	version []byte,
-	errCh chan<- error,
-) (*Server, error) {
+) (*Service, error) {
 	srv := &Service{
-		log:     log,
 		db:      db,
 		apiKey:  apiKey,
-		client:  &http.Client{Timeout: 10 * time.Second},
 		workers: sjs.NewWorkerMap(),
 	}
 
@@ -50,16 +49,14 @@ func NewServer(
 	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("health checked\n")
 		w.Write([]byte("OK"))
 	})
 	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("version checked\n")
 		w.Write(version)
 	})
 	mux.Handle("/jobs", chain.Then(http.HandlerFunc(srv.handleJobs)))
-	mux.Handle("/servers", chain.Then(http.HandlerFunc(srv.handleServers)))
-	srv.mux = mux
+	mux.Handle("/servers", chain.Then(http.HandlerFunc(srv.handleServices)))
+	srv.Mux = mux
 
 	// Fetch and start running active jobs
 	jobs, err := db.GetActiveJobs(context.Background())
@@ -67,12 +64,23 @@ func NewServer(
 		return nil, errors.Wrap(err, "get active jobs")
 	}
 	for _, job := range jobs {
-		sjs.Schedule(job)
+		sjs.Schedule(db, srv.workers, job, srv.errCh)
 	}
+
+	// Remove workers from rotation when they stop sending heartbeats.
+	srv.workers.PurgeWorkersEvery(30 * time.Second)
 	return srv, nil
 }
 
-func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+// Err is a convenience wrapper for handling errors.
+func (s *Service) Err() <-chan error {
+	if s.errCh == nil {
+		s.errCh = make(chan error, 1)
+	}
+	return s.errCh
+}
+
+func (s *Service) handleJobs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		s.handleGetJobs(w, r)
@@ -83,44 +91,44 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleServices(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "POST":
-		s.addServer(w, r)
+		s.addService(w, r)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-// addServer notifies the job service of a new endpoint and its capabilities.
-func (s *Server) addServer(w http.ResponseWriter, r *http.Request) {
-	data := sjs.Worker{}
-	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-		err = errors.Wrap(err, "decode json")
-		http.Error(w, err, http.StatusBadRequest)
+// addService notifies the job service of a new endpoint and its capabilities.
+func (s *Service) addService(w http.ResponseWriter, r *http.Request) {
+	worker := &sjs.Worker{}
+	if err := json.NewDecoder(r.Body).Decode(worker); err != nil {
+		s := fmt.Sprintf("decode json: %s", err.Error())
+		http.Error(w, s, http.StatusBadRequest)
 		return
 	}
-	ul, err := url.Parse(w.NotifyURL)
+	ul, err := url.Parse(worker.NotifyURL)
 	if err != nil {
-		err = errors.Wrap(err, "invalid NotifyURL")
-		http.Error(w, err, http.StatusBadRequest)
+		s := fmt.Sprintf("invalid NotifyURL: %s", err.Error())
+		http.Error(w, s, http.StatusBadRequest)
 		return
 	}
 	if ul.Scheme == "" || ul.Host == "" || ul.Path == "" {
-		err = errors.New("invalid NotifyURL")
-		http.Error(w, err, http.StatusBadRequest)
+		s := fmt.Sprintf("invalid NotifyURL: %s", err.Error())
+		http.Error(w, s, http.StatusBadRequest)
 		return
 	}
-	if len(w.Capabilities) == 0 {
-		err = errors.New("worker must have capabilities")
-		http.Error(w, err, http.StatusBadRequest)
+	if len(worker.Capabilities) == 0 {
+		s := "worker must have capabilities"
+		http.Error(w, s, http.StatusBadRequest)
 		return
 	}
-	s.workers.AddWorker(w)
+	s.workers.AddWorker(worker)
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) handleGetJobs(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleGetJobs(w http.ResponseWriter, r *http.Request) {
 	var head string
 	head, r.URL.Path = shiftPath(r.URL.Path) // jobs
 	if r.URL.Path == "/" {
@@ -130,18 +138,18 @@ func (s *Server) handleGetJobs(w http.ResponseWriter, r *http.Request) {
 	head, r.URL.Path = shiftPath(r.URL.Path) // id
 	jobID, err := strconv.Atoi(head)
 	if err != nil {
-		err = errors.Wrap(err, "parse job id")
-		http.Error(w, err, http.StatusBadRequest)
+		s := fmt.Sprintf("parse job id: %s", err.Error())
+		http.Error(w, s, http.StatusBadRequest)
 		return
 	}
-	s.getJobForID(w, r, jobID)
+	s.getJob(w, r, jobID)
 }
 
-func (s *Server) getJobs(w http.ResponseWriter, r *http.Request) {
+func (s *Service) getJobs(w http.ResponseWriter, r *http.Request) {
 	// TODO - do we need this?
 }
 
-func (s *Server) getJob(w http.ResponseWriter, r *http.Request, id int) {
+func (s *Service) getJob(w http.ResponseWriter, r *http.Request, id int) {
 	ctx := r.Context()
 	job, err := s.db.GetJobForID(ctx, id)
 	if sjs.IsMissing(err) {
@@ -149,39 +157,30 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request, id int) {
 		return
 	}
 	if err != nil {
-		err = errors.Wrap(err, "get job for id")
-		http.Error(w, err, http.StatusInternalServerError)
+		s := fmt.Sprintf("get job for id: %s", err.Error())
+		http.Error(w, s, http.StatusInternalServerError)
 		return
 	}
 	json.NewEncoder(w).Encode(job)
 }
 
-func (s *Server) postJob(w http.ResponseWriter, r *http.Request) {
-	data := struct {
-		Name              string
-		RunEveryInSeconds int
-		TimeoutInSeconds  *int
-	}{}
-	err := json.NewDecoder(r.Body).Decode(&data)
+func (s *Service) postJob(w http.ResponseWriter, r *http.Request) {
+	job := &sjs.Job{}
+	err := json.NewDecoder(r.Body).Decode(job)
 	if err != nil {
-		err = errors.Wrap(err, "decode job data")
-		http.Error(w, err, http.StatusBadRequest)
+		s := fmt.Sprintf("decode job: %s", err.Error())
+		http.Error(w, s, http.StatusBadRequest)
 		return
-	}
-	job := &Job{
-		Name:             data.Name,
-		RunEvery:         data.RunEveryInSeconds * time.Duration,
-		TimeoutInSeconds: data.TimeoutInSeconds * time.Duration,
 	}
 	if err = job.Valid(); err != nil {
-		err = errors.Wrap(err, "invalid job")
-		http.Error(w, err, http.StatusBadRequest)
+		s := fmt.Sprintf("invalid job: %s", err.Error())
+		http.Error(w, s, http.StatusBadRequest)
 		return
 	}
-	job.ID, err = s.db.CreateJob(r.Context(), job)
+	job.ID, err = s.db.GetOrCreateJob(r.Context(), job)
 	if err != nil {
-		err = errors.Wrap(err, "create job")
-		http.Error(w, err, http.StatusBadRequest)
+		s := fmt.Sprintf("create job: %s", err.Error())
+		http.Error(w, s, http.StatusBadRequest)
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
