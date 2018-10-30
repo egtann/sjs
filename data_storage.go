@@ -10,11 +10,14 @@ type DataStorage interface {
 	// GetOrCreateJob reports the created ID and an error, if any.
 	GetOrCreateJob(context.Context, *Job) (int, error)
 
+	// GetJobs reports all jobs regardless of their status.
+	GetJobs(context.Context) ([]*Job, error)
+
 	// GetActiveJobs reports all incomplete, non-paused jobs.
 	GetActiveJobs(context.Context) ([]*Job, error)
 
+	UpdateJob(context.Context, *Job) error
+
 	// CreateJobResult tracks successes and failures.
 	CreateJobResult(context.Context, *JobResult) error
-
-	UpdateJob(context.Context, *Job) error
 }

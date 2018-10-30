@@ -3,6 +3,7 @@ package sjs
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -20,19 +21,45 @@ type Job struct {
 	// run, this is nil.
 	LastRun *time.Time
 
-	// RunEveryInSeconds describes the interval on which to run the job.
-	RunEveryInSeconds int
+	// RunEvery describes the interval on which to run the job.
+	RunEvery int
+
+	// RunEveryPeriod can be "second" or "day of month".
+	RunEveryPeriod JobPeriod
 
 	// TimeoutInSeconds is the max length of time that a specific job's
 	// execution is allowed before it's canceled. If nil, the job may run
 	// forever.
 	TimeoutInSeconds *int
 
-	// JobStatus indicates whether a job is complete, paused, or running.
-	JobStatus JobStatus
-
 	// PayloadData included every time sjs notifies a worker.
 	PayloadData []byte
+
+	// JobStatus indicates whether the job is running or paused.
+	JobStatus JobStatus
+}
+
+// JobPeriod determines how often the job should be run. Second indicates that
+// the job should run every X seconds. Day of month indicates that the job
+// should run on every X day of the month, such as the Jan 1st, Feb 1st, Mar
+// 1st, etc.
+type JobPeriod string
+
+const (
+	JobPeriodSecond     JobPeriod = "second"
+	JobPeriodDayOfMonth           = "dayOfMonth"
+)
+
+// JobData is sent when registering worker capabilities. This enables the
+// creation of jobs with that. Using a zero value for TimeoutInSeconds is
+// treated as no timeout. When created, jobs default to running.
+type JobData struct {
+	Name             JobName
+	RunEvery         int
+	RunEveryPeriod   JobPeriod
+	TimeoutInSeconds int
+	JobStatus        JobStatus
+	PayloadData      []byte
 }
 
 // JobResult represents the result of a particular job. Any job will have 1 or
@@ -52,9 +79,8 @@ type JobName string
 type JobStatus string
 
 const (
-	JobStatusComplete = "complete"
-	JobStatusPaused   = "paused"
-	JobStatusRunning  = "running"
+	JobStatusPaused  = "paused"
+	JobStatusRunning = "running"
 )
 
 // Valid reports whether a job is valid or not. If invalid, this reports an
@@ -66,61 +92,113 @@ func (j *Job) Valid() error {
 	if j.Name == "" {
 		return errors.New("Name cannot be empty")
 	}
-	if j.RunEveryInSeconds < 1 {
-		return errors.New("RunEveryInSeconds must be >= 1 second")
+	if j.RunEvery < 1 {
+		return errors.New("RunEvery must be >= 1 second")
+	}
+	switch j.JobStatus {
+	case JobStatusRunning, JobStatusPaused:
+		// Do nothing
+	default:
+		return fmt.Errorf("invalid job status: %s", j.JobStatus)
 	}
 	return nil
 }
 
-// Schedule a job to run in a goroutine.
+// Schedule a job to run.
 func Schedule(
+	ctx context.Context,
 	db DataStorage,
 	workerMap *WorkerMap,
 	j *Job,
-	errCh chan<- error,
+	errCh *OptErr,
 ) {
-	go schedule(db, workerMap, j, errCh)
+	// Since the job is new, we update the job in the database.
+	err := db.UpdateJob(ctx, j)
+	if err != nil {
+		errCh.Send(errors.Wrap(err, "updating job"))
+		// Keep going; we can still run the timer correctly even if
+		// updating the job failed
+	}
+
+	// Now we have a timer that we need to listen to
+	go func() {
+		for {
+			workerMap.mu.RLock()
+			wg := workerMap.data[j.Name]
+			workerMap.mu.RUnlock()
+
+			select {
+			case start := <-wg.ticker.C:
+				jobTick(db, workerMap, j, start, errCh)
+			case <-wg.doneCh:
+				wg.ticker.Stop()
+				return
+			}
+		}
+	}()
 }
 
-func schedule(
+func jobTick(
 	db DataStorage,
 	workerMap *WorkerMap,
 	j *Job,
-	errCh chan<- error,
+	start time.Time,
+	errCh *OptErr,
 ) {
-	dur := time.Duration(j.RunEveryInSeconds) * time.Second
-	for start := range time.Tick(dur) {
-		ctx := context.Background()
-		var cancel context.CancelFunc
-		if j.TimeoutInSeconds != nil {
-			t := time.Duration(*j.TimeoutInSeconds) * time.Second
-			ctx, cancel = context.WithTimeout(ctx, t)
-		}
-		err := run(ctx, workerMap, j)
-		result := &JobResult{
-			JobID:     j.ID,
-			Succeeded: err == nil,
-			StartedAt: start,
-			EndedAt:   time.Now(),
-		}
-		if err != nil {
-			errCh <- errors.Wrap(err, "run")
-
-			// Update our JobResult
-			errMsg := err.Error()
-			result.ErrMessage = &errMsg
-
-			// Don't return or continue in this error handling. We
-			// want to record the failed job result below and
-			// cancel the context to free up resources
-		}
-		if err = db.CreateJobResult(ctx, result); err != nil {
-			errCh <- errors.Wrap(err, "create job result")
-		}
-		if j.TimeoutInSeconds != nil {
-			cancel()
-		}
+	monthly := j.RunEveryPeriod == JobPeriodDayOfMonth
+	if monthly && start.Day() != j.RunEvery {
+		return
 	}
+	err := scheduleJobWithTimeout(workerMap, j)
+	if err != nil {
+		errCh.Send(errors.Wrap(err, "schedule"))
+		// Keep going; we want to record the job result.
+	}
+	err = recordJobResult(db, j, start, err)
+	if err != nil {
+		errCh.Send(errors.Wrap(err, "record"))
+		return
+	}
+}
+
+func recordJobResult(
+	db DataStorage,
+	j *Job,
+	start time.Time,
+	err error,
+) error {
+	result := &JobResult{
+		JobID:     j.ID,
+		Succeeded: err == nil,
+		StartedAt: start,
+		EndedAt:   time.Now(),
+	}
+	if err != nil {
+		// Update our JobResult
+		errMsg := err.Error()
+		result.ErrMessage = &errMsg
+
+		// Don't return in this error handling. We want to record the
+		// failed job result below
+	}
+	if err = db.CreateJobResult(context.Background(), result); err != nil {
+		return errors.Wrap(err, "create job result")
+	}
+	return nil
+}
+
+func scheduleJobWithTimeout(workerMap *WorkerMap, j *Job) error {
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if j.TimeoutInSeconds != nil {
+		t := time.Duration(*j.TimeoutInSeconds) * time.Second
+		ctx, cancel = context.WithTimeout(ctx, t)
+	}
+	err := run(ctx, workerMap, j)
+	if j.TimeoutInSeconds != nil {
+		cancel()
+	}
+	return errors.Wrap(err, "run")
 }
 
 // run a job. If no workers are available with that capability, then report an
@@ -132,4 +210,35 @@ func run(ctx context.Context, m *WorkerMap, j *Job) error {
 	}
 	err := worker.Run(ctx, j)
 	return errors.Wrap(err, "run job")
+}
+
+// JobFromData converts JobData to a job and validates the job, reporting any
+// errors.
+func JobFromData(jd *JobData) (*Job, error) {
+	jd.Name = JobName(strings.TrimSpace(string(jd.Name)))
+	var timeoutSecs *int
+	if jd.TimeoutInSeconds != 0 {
+		timeoutSecs = &jd.TimeoutInSeconds
+	}
+	job := &Job{
+		Name:             jd.Name,
+		RunEvery:         jd.RunEvery,
+		RunEveryPeriod:   jd.RunEveryPeriod,
+		PayloadData:      jd.PayloadData,
+		JobStatus:        JobStatusRunning,
+		TimeoutInSeconds: timeoutSecs,
+	}
+	err := job.Valid()
+	return job, errors.Wrapf(err, "invalid job %s", job.Name)
+}
+
+func jobDuration(j *Job) time.Duration {
+	switch j.RunEveryPeriod {
+	case JobPeriodSecond:
+		return time.Duration(j.RunEvery) * time.Second
+	case JobPeriodDayOfMonth:
+		return 24 * time.Hour
+	}
+	s := fmt.Sprintf("unknown job RunEveryPeriod: %s", j.RunEveryPeriod)
+	panic(s)
 }
