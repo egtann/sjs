@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"time"
 
@@ -57,16 +56,13 @@ func (c *Client) WithJobs(jobData ...*sjs.JobData) *Client {
 // server.
 func (c *Client) Heartbeat() {
 	go func() {
-		log.Println("heartbeat")
 		err := c.notify()
 		if err != nil {
 			c.errCh.Send(errors.Wrap(err, "notify"))
 		}
 		for range time.Tick(15 * time.Second) {
-			log.Println("heartbeat")
 			err = c.notify()
 			if err != nil {
-				log.Println("heartbeat failed")
 				c.errCh.Send(errors.Wrap(err, "notify"))
 			}
 		}
@@ -101,7 +97,6 @@ func (c *Client) notify() error {
 		return fmt.Errorf("%s responded with %d: %s", c.serverURL,
 			resp.StatusCode, string(byt))
 	}
-	log.Println("heartbeat succeeded")
 	return nil
 }
 
