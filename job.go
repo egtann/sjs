@@ -190,14 +190,14 @@ func recordJobResult(
 func scheduleJobWithTimeout(workerMap *WorkerMap, j *Job) error {
 	ctx := context.Background()
 	var cancel context.CancelFunc
-	if j.TimeoutInSeconds != nil {
+	if j.TimeoutInSeconds == nil {
+		ctx, cancel = context.WithCancel(ctx)
+	} else {
 		t := time.Duration(*j.TimeoutInSeconds) * time.Second
 		ctx, cancel = context.WithTimeout(ctx, t)
 	}
+	defer cancel()
 	err := run(ctx, workerMap, j)
-	if j.TimeoutInSeconds != nil {
-		cancel()
-	}
 	return errors.Wrap(err, "run")
 }
 
