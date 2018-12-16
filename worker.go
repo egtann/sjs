@@ -75,13 +75,12 @@ func (m *WorkerMap) AddWorker(
 	}
 	m.set[w.NotifyURL] = w
 	for _, j := range w.Jobs {
-		wg, exist := m.data[j.Name]
-		if exist {
-			// There's nothing else we need to do. A ticker is already
-			// running.
+		if _, exist := m.data[j.Name]; exist {
+			// There's nothing else we need to do. A ticker is
+			// already running.
 			return
 		}
-		wg = newWorkerGroup(j)
+		wg := newWorkerGroup(j)
 		wg.workers = append(wg.workers, w)
 		m.data[j.Name] = wg
 		Schedule(ctx, db, m, j, errCh)
