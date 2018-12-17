@@ -186,7 +186,7 @@ func (w *Worker) Run(ctx context.Context, j *Job) error {
 	req = req.WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", w.APIKey)
-	client := &http.Client{}
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return errors.Wrap(err, "post")
