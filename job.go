@@ -146,7 +146,6 @@ func jobTick(
 	err := scheduleJobWithTimeout(workerMap, j)
 	if err != nil {
 		errCh.Send(errors.Wrap(err, "schedule"))
-		// Keep going; we want to record the job result.
 	}
 }
 

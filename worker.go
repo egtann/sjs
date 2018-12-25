@@ -88,10 +88,9 @@ func (m *WorkerMap) AddWorker(
 	}
 }
 
+// GetWorkerForJobName is not threadsafe. Guard the underlying WorkerMap with a
+// lock.
 func (m *WorkerMap) GetWorkerForJobName(name JobName) *Worker {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	wg, ok := m.data[name]
 	if !ok || len(wg.workers) == 0 {
 		return nil
