@@ -1,14 +1,12 @@
 package http
 
 import (
-	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,7 +18,6 @@ import (
 type Service struct {
 	Mux *http.ServeMux
 
-	db         sjs.DataStorage
 	workerData *sjs.WorkerMap
 	log        *sjs.OptLogger
 	sjsURL     string
@@ -31,12 +28,8 @@ type Service struct {
 // NewService prepares the endpoints and starts the jobs. The error channel is
 // optional; if the channel is not nil, the server will send errors encountered
 // when running jobs. Jobs are distributed to workers round-robin.
-func NewService(
-	db sjs.DataStorage,
-	apiKey string,
-) (*Service, error) {
+func NewService(apiKey string) (*Service, error) {
 	srv := &Service{
-		db:         db,
 		apiKey:     apiKey,
 		workerData: sjs.NewWorkerMap(),
 		errCh:      &sjs.OptErr{},
@@ -50,12 +43,8 @@ func NewService(
 	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		if srv.log != nil {
-			srv.log.Printf("GET /health")
-		}
 		w.Write([]byte("OK"))
 	})
-	mux.Handle("/jobs", chain.Then(http.HandlerFunc(srv.handleJobs)))
 	mux.Handle("/workers", chain.Then(http.HandlerFunc(srv.handleWorkers)))
 	srv.Mux = mux
 
@@ -93,15 +82,6 @@ func (s *Service) Err() <-chan error {
 		s.errCh.RUnlock()
 	}
 	return s.errCh.C
-}
-
-func (s *Service) handleJobs(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case "GET":
-		s.handleGetJobs(w, r)
-	default:
-		http.NotFound(w, r)
-	}
 }
 
 func (s *Service) handleWorkers(w http.ResponseWriter, r *http.Request) {
@@ -151,14 +131,7 @@ func (s *Service) addWorker(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		job.ID, err = s.db.GetOrCreateJob(r.Context(), job)
-		if err != nil {
-			s := fmt.Sprintf("create job %s: %s", job.Name, err.Error())
-			http.Error(w, s, http.StatusBadRequest)
-			return
-		}
 		worker.Jobs = append(worker.Jobs, job)
-		s.log.Printf("added job %s", job.Name)
 	}
 	if len(worker.Jobs) == 0 {
 		s := "worker must have jobs. call WithJobs() on client."
@@ -166,59 +139,8 @@ func (s *Service) addWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	worker.APIKey = s.apiKey
-	s.workerData.AddWorker(r.Context(), s.db, worker, s.errCh)
+	s.workerData.AddWorker(r.Context(), s.log, worker, s.errCh)
 	w.WriteHeader(http.StatusOK)
-}
-
-func (s *Service) handleGetJobs(w http.ResponseWriter, r *http.Request) {
-	var head string
-	head, r.URL.Path = shiftPath(r.URL.Path) // jobs
-	if r.URL.Path == "/" {
-		s.getJobs(w, r)
-		return
-	}
-	head, r.URL.Path = shiftPath(r.URL.Path) // id
-	jobID, err := strconv.Atoi(head)
-	if err != nil {
-		s := fmt.Sprintf("parse job id: %s", err.Error())
-		http.Error(w, s, http.StatusBadRequest)
-		return
-	}
-	s.getJob(w, r, jobID)
-}
-
-func (s *Service) getJobsData(ctx context.Context) ([]byte, error) {
-	jobs, err := s.db.GetJobs(ctx)
-	if err != nil {
-		return nil, errors.Wrap(err, "get jobs")
-	}
-	byt, err := json.Marshal(jobs)
-	return byt, errors.Wrap(err, "marshal jobs")
-}
-
-func (s *Service) getJobs(w http.ResponseWriter, r *http.Request) {
-	byt, err := s.getJobsData(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Write(byt)
-}
-
-func (s *Service) getJob(w http.ResponseWriter, r *http.Request, id int) {
-	s.log.Printf("retrieving job %d", id)
-	ctx := r.Context()
-	job, err := s.db.GetJobForID(ctx, id)
-	if sjs.IsMissing(err) {
-		http.NotFound(w, r)
-		return
-	}
-	if err != nil {
-		s := fmt.Sprintf("get job for id: %s", err.Error())
-		http.Error(w, s, http.StatusInternalServerError)
-		return
-	}
-	json.NewEncoder(w).Encode(job)
 }
 
 func setJSONContentType(next http.Handler) http.Handler {

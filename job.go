@@ -107,20 +107,15 @@ func (j *Job) Valid() error {
 // Schedule a job to run.
 func Schedule(
 	ctx context.Context,
-	db DataStorage,
 	workerMap *WorkerMap,
 	j *Job,
 	errCh *OptErr,
 ) {
-	// Since the job is new, we update the job in the database.
-	err := db.UpdateJob(ctx, j)
-	if err != nil {
-		errCh.Send(errors.Wrap(err, "updating job"))
-		// Keep going; we can still run the timer correctly even if
-		// updating the job failed
-	}
+	// Run the job once immediately. Jobs that require a specific day of
+	// the month won't run unless on that day.
+	jobTick(workerMap, j, time.Now(), errCh)
 
-	// Now we have a timer that we need to listen to
+	// And set up a ticker to continue running in the background
 	go func() {
 		for {
 			workerMap.mu.RLock()
@@ -129,7 +124,7 @@ func Schedule(
 
 			select {
 			case start := <-wg.ticker.C:
-				jobTick(db, workerMap, j, start, errCh)
+				jobTick(workerMap, j, start, errCh)
 			case <-wg.doneCh:
 				wg.ticker.Stop()
 				return
@@ -139,7 +134,6 @@ func Schedule(
 }
 
 func jobTick(
-	db DataStorage,
 	workerMap *WorkerMap,
 	j *Job,
 	start time.Time,
@@ -154,37 +148,6 @@ func jobTick(
 		errCh.Send(errors.Wrap(err, "schedule"))
 		// Keep going; we want to record the job result.
 	}
-	err = recordJobResult(db, j, start, err)
-	if err != nil {
-		errCh.Send(errors.Wrap(err, "record"))
-		return
-	}
-}
-
-func recordJobResult(
-	db DataStorage,
-	j *Job,
-	start time.Time,
-	err error,
-) error {
-	result := &JobResult{
-		JobID:     j.ID,
-		Succeeded: err == nil,
-		StartedAt: start,
-		EndedAt:   time.Now(),
-	}
-	if err != nil {
-		// Update our JobResult
-		errMsg := err.Error()
-		result.ErrMessage = &errMsg
-
-		// Don't return in this error handling. We want to record the
-		// failed job result below
-	}
-	if err = db.CreateJobResult(context.Background(), result); err != nil {
-		return errors.Wrap(err, "create job result")
-	}
-	return nil
 }
 
 func scheduleJobWithTimeout(workerMap *WorkerMap, j *Job) error {

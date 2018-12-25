@@ -61,7 +61,7 @@ func NewWorkerMap() *WorkerMap {
 
 func (m *WorkerMap) AddWorker(
 	ctx context.Context,
-	db DataStorage,
+	lg *OptLogger,
 	w *Worker,
 	errCh *OptErr,
 ) {
@@ -83,7 +83,8 @@ func (m *WorkerMap) AddWorker(
 		wg := newWorkerGroup(j)
 		wg.workers = append(wg.workers, w)
 		m.data[j.Name] = wg
-		Schedule(ctx, db, m, j, errCh)
+		Schedule(ctx, m, j, errCh)
+		lg.Printf("added job %s (run every %d %s)", j.Name, j.RunEvery, j.RunEveryPeriod)
 	}
 }
 
