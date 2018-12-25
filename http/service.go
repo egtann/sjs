@@ -110,11 +110,11 @@ func (s *Service) getWorkers(w http.ResponseWriter, r *http.Request) {
 // maintain worker state. If this service goes down and is restarted, workers
 // are added again in seconds automatically due to this heartbeat.
 func (s *Service) addWorker(w http.ResponseWriter, r *http.Request) {
-	s.log.Printf("got heartbeat")
 	heartbeat := sjs.Heartbeat{}
 	if err := json.NewDecoder(r.Body).Decode(&heartbeat); err != nil {
-		s := fmt.Sprintf("decode json: %s", err.Error())
-		http.Error(w, s, http.StatusBadRequest)
+		msg := fmt.Sprintf("decode json: %s", err.Error())
+		s.log.Printf("bad heartbeat: %s", msg)
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 	worker := s.workerData.GetOrCreateWorkerForNotifyURL(heartbeat.NotifyURL)
@@ -129,13 +129,15 @@ func (s *Service) addWorker(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			err = errors.Wrap(err, "job from data")
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			s.log.Printf("bad heartbeat: bad job: %s", err.Error())
 			return
 		}
 		worker.Jobs = append(worker.Jobs, job)
 	}
 	if len(worker.Jobs) == 0 {
-		s := "worker must have jobs. call WithJobs() on client."
-		http.Error(w, s, http.StatusBadRequest)
+		msg := "worker must have jobs. call WithJobs() on client."
+		s.log.Printf("bad heartbeat: no jobs: %+v", worker)
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 	worker.APIKey = s.apiKey
