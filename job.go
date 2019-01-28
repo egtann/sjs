@@ -166,6 +166,9 @@ func scheduleJobWithTimeout(workerMap *WorkerMap, j *Job) error {
 // run a job. If no workers are available with that capability, then report an
 // error.
 func run(ctx context.Context, m *WorkerMap, j *Job) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	worker := m.GetWorkerForJobName(j.Name)
 	if worker == nil {
 		return fmt.Errorf("no workers capable of %s", j.Name)
