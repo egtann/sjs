@@ -21,10 +21,12 @@ type Client struct {
 	apiKey    string
 	selfURL   string
 	serverURL string
+	host      string
+	role      string
 	errCh     *sjs.OptErr
 }
 
-func NewClient(selfURL, sjsURL, apiKey string) *Client {
+func NewClient(selfURL, sjsURL, apiKey, host, role string) *Client {
 	return &Client{
 		selfURL:   selfURL,
 		serverURL: sjsURL,
@@ -84,6 +86,8 @@ func (c *Client) notify() error {
 		return errors.Wrap(err, "new request")
 	}
 	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("X-Host", c.host)
+	req.Header.Set("X-Role", c.role)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return errors.Wrap(err, "do")

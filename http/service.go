@@ -110,9 +110,11 @@ func (s *Service) getWorkers(w http.ResponseWriter, r *http.Request) {
 // maintain worker state. If this service goes down and is restarted, workers
 // are added again in seconds automatically due to this heartbeat.
 func (s *Service) addWorker(w http.ResponseWriter, r *http.Request) {
+	role := r.Header.Get("X-Role")
+	host := r.Header.Get("X-Host")
 	heartbeat := sjs.Heartbeat{}
 	if err := json.NewDecoder(r.Body).Decode(&heartbeat); err != nil {
-		msg := fmt.Sprintf("decode json: %s", err.Error())
+		msg := fmt.Sprintf("%s %s: decode json: %s", role, host, err.Error())
 		s.log.Printf("bad heartbeat: %s", msg)
 		http.Error(w, msg, http.StatusBadRequest)
 		return
