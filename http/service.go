@@ -3,7 +3,6 @@ package http
 import (
 	"crypto/subtle"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/url"
 	"path"
@@ -45,7 +44,7 @@ func NewService(apiKey string) (*Service, error) {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("OK"))
 	})
-	mux.Handle("/workers", chain.Then(http.HandlerFunc(srv.handleWorkers)))
+	mux.Handle("/workers", chain.Then(http.HandlerFunc(srv.addWorker)))
 	srv.Mux = mux
 
 	// Remove workers from rotation when they stop sending heartbeats.
@@ -72,7 +71,6 @@ func (s *Service) WithLogger(log sjs.Logger) *Service {
 // Err is a convenience wrapper for handling errors.
 func (s *Service) Err() <-chan error {
 	s.errCh.RLock()
-
 	if s.errCh.C == nil {
 		s.errCh.RUnlock()
 		s.errCh.Lock()
@@ -84,67 +82,48 @@ func (s *Service) Err() <-chan error {
 	return s.errCh.C
 }
 
-func (s *Service) handleWorkers(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case "GET":
-		s.getWorkers(w, r)
-	case "POST":
-		s.addWorker(w, r)
-	default:
-		http.NotFound(w, r)
-	}
-}
-
-func (s *Service) getWorkers(w http.ResponseWriter, r *http.Request) {
-	byt, err := json.Marshal(s.workerData.Workers())
-	if err != nil {
-		err = errors.Wrap(err, "marshal workers")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Write(byt)
-}
-
 // addWorker notifies the job service of a new worker and its capabilities.
 // This is the heartbeat URL. Combining the two prevents us from needing to
 // maintain worker state. If this service goes down and is restarted, workers
 // are added again in seconds automatically due to this heartbeat.
 func (s *Service) addWorker(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.NotFound(w, r)
+		return
+	}
+	if err := s.addWorkerData(r); err != nil {
+		s.log.Printf("%s", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Service) addWorkerData(r *http.Request) error {
 	role := r.Header.Get("X-Role")
 	host := r.Header.Get("X-Host")
 	heartbeat := sjs.Heartbeat{}
 	if err := json.NewDecoder(r.Body).Decode(&heartbeat); err != nil {
-		msg := fmt.Sprintf("%s %s: decode json: %s", role, host, err.Error())
-		s.log.Printf("bad heartbeat: %s", msg)
-		http.Error(w, msg, http.StatusBadRequest)
-		return
+		return errors.Wrapf(err, "bad heartbeat (%s@%s): decode json", role, host)
 	}
 	worker := s.workerData.GetOrCreateWorkerForNotifyURL(heartbeat.NotifyURL)
 	_, err := url.Parse(worker.NotifyURL)
 	if err != nil {
-		s := fmt.Sprintf("invalid NotifyURL: %s", err.Error())
-		http.Error(w, s, http.StatusBadRequest)
-		return
+		return errors.Wrap(err, "invalid NotifyURL")
 	}
 	for _, jd := range heartbeat.Jobs {
 		job, err := sjs.JobFromData(jd)
 		if err != nil {
-			err = errors.Wrap(err, "job from data")
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			s.log.Printf("bad heartbeat: bad job: %s", err.Error())
-			return
+			return errors.Wrap(err, "bad heartbeat: bad job: job from data")
 		}
 		worker.Jobs = append(worker.Jobs, job)
 	}
 	if len(worker.Jobs) == 0 {
-		msg := "worker must have jobs. call WithJobs() on client."
-		s.log.Printf("bad heartbeat: no jobs: %+v", worker)
-		http.Error(w, msg, http.StatusBadRequest)
-		return
+		return errors.New("worker must have jobs. call WithJobs() on client.")
 	}
 	worker.APIKey = s.apiKey
 	s.workerData.AddWorker(r.Context(), s.log, worker, s.errCh)
-	w.WriteHeader(http.StatusOK)
+	return nil
 }
 
 func setJSONContentType(next http.Handler) http.Handler {

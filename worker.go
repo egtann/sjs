@@ -66,23 +66,30 @@ func (m *WorkerMap) AddWorker(
 	errCh *OptErr,
 ) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	w.lastHeartbeat = time.Now()
 	if _, exist := m.set[w.NotifyURL]; exist {
 		// We already have this worker. Nothing else to do
+		m.mu.Unlock()
 		return
 	}
 	m.set[w.NotifyURL] = w
+	m.mu.Unlock()
+
 	for _, j := range w.Jobs {
+		m.mu.Lock()
 		if _, exist := m.data[j.Name]; exist {
 			// There's nothing else we need to do. A ticker is
 			// already running.
+			m.mu.Unlock()
 			return
 		}
 		wg := newWorkerGroup(j)
 		wg.workers = append(wg.workers, w)
 		m.data[j.Name] = wg
+
+		// Unlock ahead of Schedule, which acquires its own lock on a
+		// timed loop
+		m.mu.Unlock()
 		Schedule(ctx, m, j, errCh)
 		lg.Printf("added job %s (run every %d %s)", j.Name, j.RunEvery, j.RunEveryPeriod)
 	}

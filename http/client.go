@@ -27,11 +27,12 @@ type Client struct {
 }
 
 func NewClient(selfURL, sjsURL, apiKey, host, role string) *Client {
+	client := &http.Client{Timeout: 10 * time.Second}
 	return &Client{
 		selfURL:   selfURL,
 		serverURL: sjsURL,
 		apiKey:    apiKey,
-		client:    &http.Client{Timeout: 10 * time.Second},
+		client:    client,
 		errCh:     &sjs.OptErr{},
 		host:      host,
 		role:      role,
