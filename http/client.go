@@ -33,6 +33,8 @@ func NewClient(selfURL, sjsURL, apiKey, host, role string) *Client {
 		apiKey:    apiKey,
 		client:    &http.Client{Timeout: 10 * time.Second},
 		errCh:     &sjs.OptErr{},
+		host:      host,
+		role:      role,
 	}
 }
 
