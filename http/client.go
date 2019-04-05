@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/egtann/sjs"
+	"github.com/hashicorp/go-cleanhttp"
 	"github.com/pkg/errors"
 )
 
@@ -27,15 +28,14 @@ type Client struct {
 }
 
 func NewClient(selfURL, sjsURL, apiKey, host, role string) *Client {
-	client := &http.Client{Timeout: 10 * time.Second}
+	httpClient := cleanhttp.DefaultClient()
+	httpClient.Timeout = 10 * time.Second
 	return &Client{
 		selfURL:   selfURL,
 		serverURL: sjsURL,
 		apiKey:    apiKey,
-		client:    client,
+		client:    httpClient,
 		errCh:     &sjs.OptErr{},
-		host:      host,
-		role:      role,
 	}
 }
 
