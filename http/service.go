@@ -97,8 +97,7 @@ func (s *Service) addWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	role := r.Header.Get("X-Role")
-	host := r.Header.Get("X-Host")
-	s.log.Printf("good heartbeat (%s@%s)", role, host)
+	s.log.Printf("good heartbeat (%s@%s)", role, r.RemoteAddr)
 	w.WriteHeader(http.StatusOK)
 }
 
