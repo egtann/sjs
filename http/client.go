@@ -18,7 +18,7 @@ import (
 type Client struct {
 	Jobs []*sjs.JobData
 
-	client    *http.Client
+	client    HTTPClient
 	apiKey    string
 	selfURL   string
 	serverURL string
@@ -37,6 +37,15 @@ func NewClient(selfURL, sjsURL, apiKey, host, role string) *Client {
 		client:    httpClient,
 		errCh:     &sjs.OptErr{},
 	}
+}
+
+type HTTPClient interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+func (c *Client) WithHTTPClient(h HTTPClient) *Client {
+	c.client = h
+	return c
 }
 
 // WithJobs appends jobs that can be performed by the client.
